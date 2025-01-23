@@ -1,0 +1,177 @@
+# Ensure Java is installed
+- name: Ensure Java is installed
+  apt:
+    name: default-jdk
+    state: present
+    update_cache: yes
+  become: yes
+
+# Install Docker and set up the agent environment
+- name: Install Docker
+  apt:
+    name: docker.io
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Add Jenkins user to the Docker group
+  user:
+    name: jenkins
+    groups: docker
+    append: yes
+  become: yes
+
+- name: Enable and start Docker service
+  service:
+    name: docker
+    state: started
+    enabled: yes
+  become: yes
+
+- name: Create a Jenkins agent directory
+  file:
+    path: /home/jenkins/agent
+    state: directory
+    owner: jenkins
+    group: jenkins
+    mode: '0755'
+  become: yes
+
+# Ensure Java is installed on Jenkins master
+- name: Ensure Java is installed on Jenkins master
+  apt:
+    name: default-jdk
+    state: present
+    update_cache: yes
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+  become: yes
+
+# Step 3: Download Jenkins Agent Jar
+- name: Download Jenkins agent jar
+  get_url:
+    url: "http://{{ client_dns }}:8080/jnlpJars/agent.jar"
+    dest: /home/jenkins/agent/agent.jar
+    owner: jenkins
+    group: jenkins
+    mode: '0755'
+  become: yes
+
+# Download Jenkins CLI jar
+- name: Download Jenkins CLI
+  get_url:
+    url: "http://{{ client_dns }}:8080/jnlpJars/jenkins-cli.jar"
+    dest: "/tmp/jenkins-cli.jar"
+    force: yes
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Create credentials file for CLI
+- name: Create Jenkins CLI credentials file
+  copy:
+    content: |
+      <?xml version='1.1' encoding='UTF-8'?>
+      <slave>
+        <name>docker-agent</name>
+        <description>Docker Agent</description>
+        <remoteFS>/home/jenkins/agent</remoteFS>
+        <numExecutors>1</numExecutors>
+        <mode>NORMAL</mode>
+        <retentionStrategy class="hudson.slaves.RetentionStrategy$Always"/>
+        <launcher class="hudson.slaves.JNLPLauncher">
+          <workDirSettings>
+            <disabled>false</disabled>
+            <internalDir>remoting</internalDir>
+            <failIfWorkDirIsMissing>false</failIfWorkDirIsMissing>
+          </workDirSettings>
+        </launcher>
+        <label>docker</label>
+        <nodeProperties/>
+      </slave>
+    dest: "/tmp/node.xml"
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Create the node using Jenkins CLI
+- name: Create Jenkins node
+  shell: >
+    java -jar /tmp/jenkins-cli.jar -s http://localhost:8080 -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
+    create-node docker-agent < /tmp/node.xml
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+  register: cli_result
+  failed_when: cli_result.rc != 0 and 'already exists' not in cli_result.stderr
+  changed_when: cli_result.rc == 0
+
+# Get CSRF token first
+- name: Get CSRF token
+  uri:
+    url: "http://{{ client_dns }}:8080/crumbIssuer/api/json"
+    method: GET
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_password }}"
+    force_basic_auth: yes
+    return_content: yes
+  register: crumb_result
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Get the secret from JNLP URL
+- name: Get agent secret from JNLP URL
+  uri:
+    url: "http://{{ client_dns }}:8080/computer/docker-agent/jenkins-agent.jnlp"
+    method: GET
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_password }}"
+    force_basic_auth: yes
+    headers:
+      Jenkins-Crumb: "{{ crumb_result.json.crumb }}"
+    return_content: yes
+  register: jnlp_content
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Extract secret from JNLP content
+- name: Extract secret from JNLP content
+  set_fact:
+    jenkins_agent_secret: "{{ jnlp_content.content | regex_search('<application-desc>.*?<argument>(.*?)</argument>', '\\1') | first }}"
+  when: jnlp_content is defined
+
+# Clean up temporary files
+- name: Remove temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+  with_items:
+    - "/tmp/jenkins-cli.jar"
+    - "/tmp/node.xml"
+
+# Set up systemd service
+- name: Set up systemd service for Jenkins agent
+  copy:
+    dest: /etc/systemd/system/jenkins-agent.service
+    content: |
+      [Unit]
+      Description=Jenkins Agent
+      After=network.target
+
+      [Service]
+      User=jenkins
+      Group=jenkins
+      WorkingDirectory=/home/jenkins/agent
+      ExecStart=/usr/bin/java -jar /home/jenkins/agent/agent.jar -url http://{{ client_dns }}:8080 -name docker-agent -secret {{ jenkins_agent_secret }} -workDir /home/jenkins/agent
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: '0755'
+  become: yes
+
+- name: Reload systemd to apply Jenkins agent service
+  systemd:
+    daemon_reload: yes
+  become: yes
+
+- name: Enable and start Jenkins agent service
+  service:
+    name: jenkins-agent
+    state: started
+    enabled: yes
+  become: yes

@@ -1,0 +1,12 @@
+---
+- hosts: ec2_tpp_prod
+  gather_facts: true
+
+  roles:
+    - role: "prod"
+
+  tasks:
+    - name: Setting up Prod servers
+      debug:
+        msg: "Prod server setup complete."
+

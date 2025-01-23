@@ -1,0 +1,302 @@
+---
+# jenkins/tasks/main.yaml
+- name: Set Jenkins IP as a fact
+  set_fact:
+    jenkins_ip: "{{ ansible_host }}"
+
+- name: Install dependencies
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - software-properties-common
+      - gnupg
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Add Docker GPG apt key
+  apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+  become: yes
+
+- name: Add Docker repository
+  apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+  become: yes
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+  become: yes
+
+- name: Install Docker
+  apt:
+    name: docker.io
+    state: present
+  become: yes
+
+- name: Create required directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: 1000
+    group: 1000
+    mode: '0755'
+  loop:
+    - /var/jenkins_home
+    - /var/jenkins_home/jobs
+    - /var/jenkins_home/jobs/tpp
+    - /var/jenkins_home/jobs/tpp/builds
+    - /tmp/jenkins_files
+    - /var/jenkins_home/init.groovy.d
+    - /var/jenkins_home/nodes
+    - /var/jenkins_home/nodes/docker-agent
+  become: yes
+  ignore_errors: yes
+
+- name: Copy credentials.xml to Jenkins home
+  copy:
+    src: ./credentials.xml  # Relative path to the file
+    dest: /var/jenkins_home  # Target path on the host
+    owner: 1000
+    group: 1000
+    mode: '0755'
+  become: yes
+
+# - name: Copy master.key to Jenkins home
+#   copy:
+#     src: ./master.key  # Relative path to the file
+#     dest: /var/jenkins_home/secrets  # Target path on the host
+#     owner: 1000
+#     group: 1000
+#     mode: '0755'
+#   become: yes
+
+# - name: Copy hudson.util.Secret to Jenkins home
+#   copy:
+#     src: ./hudson.util.Secret  # Relative path to the file
+#     dest: /var/jenkins_home/secrets  # Target path on the host
+#     owner: 1000
+#     group: 1000
+#     mode: '0755'
+#   become: yes
+
+- name: Copy plugins.txt to build context
+  copy:
+    dest: /tmp/jenkins_files/plugins.txt
+    content: |
+      ant:latest
+      antisamy-markup-formatter:latest
+      authorize-project:latest
+      build-timeout:latest
+      cloudbees-folder:latest
+      configuration-as-code:latest
+      credentials-binding:latest
+      email-ext:latest
+      git:latest
+      github-branch-source:latest
+      gradle:latest
+      ldap:latest
+      mailer:latest
+      matrix-auth:latest
+      pam-auth:latest
+      pipeline-github-lib:latest
+      pipeline-stage-view:latest
+      ssh-slaves:latest
+      timestamper:latest
+      workflow-aggregator:latest
+      ws-cleanup:latest
+      pipeline-stage-view:2.34
+      job-dsl:latest
+      workflow-job:latest
+      workflow-cps:latest
+  become: yes
+
+- name: Copy init.groovy to build context
+  copy:
+    dest: /tmp/jenkins_files/init.groovy
+    mode: '0644'
+    content: |
+      import jenkins.model.*
+      import hudson.security.*
+      import jenkins.security.s2m.AdminWhitelistRule
+      
+      def instance = Jenkins.getInstance()
+      
+      def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+      hudsonRealm.createAccount("admin", "admin")
+      instance.setSecurityRealm(hudsonRealm)
+      
+      def strategy = new hudson.security.FullControlOnceLoggedInAuthorizationStrategy()
+      strategy.setAllowAnonymousRead(false)
+      instance.setAuthorizationStrategy(strategy)
+      
+      instance.save()
+      
+      Jenkins.instance.getInjector().getInstance(AdminWhitelistRule.class).setMasterKillSwitch(false)
+  become: yes
+
+- name: Copy casc.yaml to build context and Jenkins home
+  copy:
+    dest: "{{ item }}"
+    mode: '0644'
+    owner: 1000
+    group: 1000
+    content: |
+      jenkins:
+        systemMessage: "Jenkins configured automatically by Configuration as Code plugin"
+        numExecutors: 2
+        mode: NORMAL
+        scmCheckoutRetryCount: 0
+        labelString: "master-node"
+        securityRealm:
+          local:
+            allowsSignup: false
+            users:
+              - id: "admin"
+                password: "admin"
+        authorizationStrategy:
+          loggedInUsersCanDoAnything:
+            allowAnonymousRead: false
+        remotingSecurity:
+          enabled: true
+        crumbIssuer: null    # This completely disables CSRF protection
+  loop:
+    - /tmp/jenkins_files/casc.yaml
+    - /var/jenkins_home/jenkins.yaml
+  become: yes
+
+- name: Copy Dockerfile
+  copy:
+    dest: /tmp/jenkins_files/Dockerfile
+    content: |
+      FROM jenkins/jenkins:lts
+      
+      USER root
+      ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
+      ENV JENKINS_HOME=/var/jenkins_home
+      ENV CASC_JENKINS_CONFIG=/var/jenkins_home/jenkins.yaml
+      
+      # Install necessary plugins
+      COPY plugins.txt /usr/share/jenkins/ref/plugins.txt
+      RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
+      
+      # Copy configuration with new name
+      COPY casc.yaml /var/jenkins_home/jenkins.yaml
+      COPY init.groovy /usr/share/jenkins/ref/init.groovy.d/init.groovy
+      
+      # Set permissions properly
+      RUN mkdir -p /var/jenkins_home/jobs/tpp/builds && \
+          chown -R jenkins:jenkins /var/jenkins_home && \
+          chmod -R 755 /var/jenkins_home
+      
+      USER jenkins
+  become: yes
+
+- name: Copy job config
+  copy:
+    dest: /var/jenkins_home/jobs/tpp/config.xml
+    mode: '0644'
+    owner: 1000
+    group: 1000
+    content: |
+      <?xml version='1.1' encoding='UTF-8'?>
+      <flow-definition plugin="workflow-job@1472.ve4d5eca_143c4">
+        <description></description>
+        <keepDependencies>false</keepDependencies>
+        <properties/>
+        <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps@4007.vd705fc76a_34e">
+          <scm class="hudson.plugins.git.GitSCM" plugin="git@5.7.0">
+            <configVersion>2</configVersion>
+            <userRemoteConfigs>
+              <hudson.plugins.git.UserRemoteConfig>
+                <url>https://github.com/dorhs/project1.git</url>
+              </hudson.plugins.git.UserRemoteConfig>
+            </userRemoteConfigs>
+            <branches>
+              <hudson.plugins.git.BranchSpec>
+                <name>*/main</name>
+              </hudson.plugins.git.BranchSpec>
+            </branches>
+            <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+            <submoduleCfg class="empty-list"/>
+            <extensions/>
+          </scm>
+          <scriptPath>Jenkinsfile</scriptPath>
+          <lightweight>true</lightweight>
+        </definition>
+        <triggers/>
+        <disabled>false</disabled>
+      </flow-definition>
+  become: yes
+
+- name: Ensure Jenkins home directory has correct permissions
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: 1000
+    group: 1000
+    mode: '0755'
+    recurse: yes
+  loop:
+    - /var/jenkins_home
+    - /var/jenkins_home/jobs
+    - /var/jenkins_home/jobs/tpp
+    - /var/jenkins_home/jobs/tpp/builds
+  become: yes
+
+- name: Build custom Jenkins image
+  docker_image:
+    name: custom_jenkins
+    build:
+      path: /tmp/jenkins_files
+      dockerfile: Dockerfile
+    source: build
+    force_source: yes
+  become: yes
+
+- name: Stop existing Jenkins container
+  docker_container:
+    name: jenkins
+    state: absent
+  become: yes
+
+- name: Run Jenkins Container
+  docker_container:
+    name: jenkins
+    image: custom_jenkins
+    state: started
+    restart_policy: always
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - /var/jenkins_home:/var/jenkins_home
+    user: jenkins
+    env:
+      JENKINS_HOME: "/var/jenkins_home"
+      CASC_JENKINS_CONFIG: "/var/jenkins_home/jenkins.yaml"
+  become: yes
+
+- name: Wait for Jenkins to start
+  uri:
+    url: "http://localhost:8080/login"
+    method: GET
+    return_content: yes
+    status_code: 200
+    follow_redirects: yes
+  register: result
+  until: result.status == 200
+  retries: 60
+  delay: 5
+  
+
+- name: Clean up build files
+  file:
+    path: /tmp/jenkins_files
+    state: absent
+  become: yes

@@ -1,0 +1,341 @@
+# Ensure Java is installed
+- name: Ensure Java is installed
+  apt:
+    name: default-jdk
+    state: present
+    update_cache: yes
+  become: yes
+
+# Install Docker and set up the agent environment
+- name: Install Asible
+  apt:
+    name: ansible
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Install required packages for AWS CLI
+  apt:
+    name:
+      - unzip
+      - curl
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Download AWS CLI installation file
+  get_url:
+    url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+    dest: "/tmp/awscliv2.zip"
+  become: yes
+
+- name: Unzip AWS CLI installation file
+  unarchive:
+    src: "/tmp/awscliv2.zip"
+    dest: "/tmp"
+    remote_src: yes
+  become: yes
+
+- name: Install AWS CLI
+  shell: "/tmp/aws/install"
+  become: yes
+
+- name: Clean up installation files
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/awscliv2.zip"
+    - "/tmp/aws"
+  become: yes
+
+
+ 
+- name: Run aws configure to set AWS Access Key ID
+  shell: aws configure set aws_access_key_id "{{ aws_access_key }}"
+    
+ 
+
+- name: Run aws configure to set AWS Secret Access Key
+  shell: aws configure set aws_secret_access_key "{{ aws_secret_key }}"
+  
+
+- name: Run aws configure to set AWS region
+  shell: aws configure set region "{{ aws_region }}"
+  
+
+- name: Run aws configure to set output format
+  shell: aws configure set output "{{ aws_output }}"
+  
+
+
+- name: Install python3
+  apt:
+    name: python3
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Install python3-pip
+  apt:
+    name: python3-pip
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Install boto3
+  pip:
+    name: boto3
+    state: present
+    extra_args: --break-system-packages
+  become: yes
+
+- name: Create a Jenkins agent directory
+  file:
+    path: /home/jenkins/agent
+    state: directory
+    owner: 1000
+    group: 1000
+    mode: '0755'
+  become: yes
+
+# Step 3: Download Jenkins Agent Jar
+- name: Download Jenkins agent jar
+  get_url:
+    url: "http://{{ client_dns }}:8080/jnlpJars/agent.jar"
+    dest: /home/jenkins/agent/agent.jar
+    owner: 1000
+    group: 1000
+    mode: '0755'
+  become: yes
+
+# Download Jenkins CLI jar
+- name: Download Jenkins CLI
+  get_url:
+    url: "http://{{ client_dns }}:8080/jnlpJars/jenkins-cli.jar"
+    dest: "/tmp/jenkins-cli.jar"
+    force: yes
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Create credentials file for CLI
+- name: Create Jenkins CLI credentials file
+  copy:
+    content: |
+      <?xml version='1.1' encoding='UTF-8'?>
+      <slave>
+        <name>ansible-agent</name>
+        <description>ansible Agent</description>
+        <remoteFS>/home/jenkins/agent</remoteFS>
+        <numExecutors>1</numExecutors>
+        <mode>NORMAL</mode>
+        <retentionStrategy class="hudson.slaves.RetentionStrategy$Always"/>
+        <launcher class="hudson.slaves.JNLPLauncher">
+          <workDirSettings>
+            <disabled>false</disabled>
+            <internalDir>remoting</internalDir>
+            <failIfWorkDirIsMissing>false</failIfWorkDirIsMissing>
+          </workDirSettings>
+        </launcher>
+        <label>ansible</label>
+        <nodeProperties/>
+      </slave>
+    dest: "/tmp/node.xml"
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Create the node using Jenkins CLI
+- name: Create Jenkins node
+  shell: >
+    java -jar /tmp/jenkins-cli.jar -s http://localhost:8080 -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
+    create-node ansible-agent < /tmp/node.xml
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+  register: cli_result
+  failed_when: cli_result.rc != 0 and 'already exists' not in cli_result.stderr
+  changed_when: cli_result.rc == 0
+
+# Get CSRF token first
+- name: Get CSRF token
+  uri:
+    url: "http://{{ client_dns }}:8080/crumbIssuer/api/json"
+    method: GET
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_password }}"
+    force_basic_auth: yes
+    return_content: yes
+  register: crumb_result
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Get the secret from JNLP URL
+- name: Get agent secret from JNLP URL
+  uri:
+    url: "http://{{ client_dns }}:8080/computer/ansible-agent/jenkins-agent.jnlp"
+    method: GET
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_password }}"
+    force_basic_auth: yes
+    headers:
+      Jenkins-Crumb: "{{ crumb_result.json.crumb }}"
+    return_content: yes
+  register: jnlp_content
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+
+# Extract secret from JNLP content
+- name: Extract secret from JNLP content
+  set_fact:
+    jenkins_agent_secret: "{{ jnlp_content.content | regex_search('<application-desc>.*?<argument>(.*?)</argument>', '\\1') | first }}"
+  when: jnlp_content is defined
+
+# Clean up temporary files
+- name: Remove temporary files
+  file:
+    path: "{{ item }}"
+    state: absent
+  delegate_to: "{{ groups['ec2_jenkins'][0] }}"
+  with_items:
+    - "/tmp/jenkins-cli.jar"
+    - "/tmp/node.xml"
+
+# Set up systemd service
+- name: Set up systemd service for Jenkins agent
+  copy:
+    dest: /etc/systemd/system/jenkins-agent.service
+    content: |
+      [Unit]
+      Description=Jenkins Agent
+      After=network.target
+
+      [Service]
+      User=1000
+      Group=1000
+      WorkingDirectory=/home/jenkins/agent
+      ExecStart=/usr/bin/java -jar /home/jenkins/agent/agent.jar -url http://{{ client_dns }}:8080 -name ansible-agent -secret {{ jenkins_agent_secret }} -workDir /home/jenkins/agent
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: '0755'
+  become: yes
+
+- name: Reload systemd to apply Jenkins agent service
+  systemd:
+    daemon_reload: yes
+  become: yes
+
+- name: Enable and start Jenkins agent service
+  service:
+    name: jenkins-agent
+    state: started
+    enabled: yes
+
+- name: Create ansible config directory
+  file:
+    path: /etc/ansible
+    state: directory
+    mode: '0755'
+    owner: 1000
+    group: 1000
+  become: yes
+
+- name: Copy KEY to Jenkins 
+  copy:
+    src: ./INT_AWS_KEY.pem  # Relative path to the file
+    dest: /etc/ansible  # Target path on the host
+    owner: 1000
+    group: 1000
+    mode: '0400'
+  become: yes
+
+- name: Copy AWS dynamic inventory file
+  copy:
+    content: |
+      plugin: aws_ec2                          # Use the AWS EC2 dynamic inventory plugin
+      regions:                                 
+        - us-west-2                            # AWS region to query for instances
+      filters:                                 
+        # tag:Environment: dev                   # Filter instances with the tag 'Environment' set to 'dev'
+        instance-state-name: running           # Only include instances that are in the 'running' state
+        "tag:Name":
+          - tpp_app1
+          - tpp_app2
+      keyed_groups:                            # Create Ansible groups based on instance tags
+        - key: tags.Purpose                    # Group instances by their 'Name' tag
+          prefix: ec2                   # Prefix for the group name (underscore for consistency)
+      hostnames:                               
+        - dns-name                             # Use the DNS name as the hostname to connect to
+      compose:                                 
+        ansible_host: dns-name                 # Use the DNS name for the 'ansible_host' variable
+        instance_name: tags.Name
+    dest: /etc/ansible/inventory_aws_ec2.yaml
+    mode: '0644'
+    owner: 1000
+    group: 1000
+    
+
+- name: Copy ansible config
+  copy:
+    content: |
+      [defaults]
+      inventory = /etc/ansible/inventory_aws_ec2.yml
+      remote_user = ubuntu
+      private_key_file = /etc/ansible/INT_AWS_KEY.pem
+      host_key_checking = False
+
+    dest: /etc/ansible/ansible.cfg
+    mode: '0644'
+    owner: 1000
+    group: 1000
+    
+
+# - name: Copy upgrade playbook
+#   copy:
+#     content: |
+#       ---
+#       - hosts: ec2_tpp_prod
+#         gather_facts: true
+#         tasks:
+#           - name: Setting up Prod servers
+#             debug:
+#               msg: "Prod server setup complete."
+          
+#           - name: Stop existing Docker container
+#             docker_container:
+#               name: "tpp-app"
+#               state: absent
+#             ignore_errors: yes
+
+#           - name: Remove Docker image if exists
+#             docker_image:
+#               name: "dengol/tpp-app"
+#               state: absent
+#               force_absent: true
+#             ignore_errors: yes
+
+#           - name: Pull Docker image
+#             community.docker.docker_image:
+#               name: dengol/tpp-app:latest
+#               source: pull
+#             become: yes
+
+#           - name: Run the Docker container
+#             community.docker.docker_container:
+#               name: tpp-app
+#               image: dengol/tpp-app
+#               state: started
+#               restart_policy: always
+#               ports:
+#                 - "8081:8081"  # Map container's port 8080 to host's port 8080
+#             become: yes
+#     dest: /etc/ansible/upgrade.yaml
+#     mode: '0644'
+#     owner: 1000
+#     group: 1000
+      
+- name: Copy upgrade.yaml to ansible 
+  copy:
+    src: ./upgrade.yaml  
+    dest: /etc/ansible/upgrade.yaml  
+    owner: 1000
+    group: 1000
+    mode: '0644'
+  become: yes

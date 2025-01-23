@@ -1,0 +1,41 @@
+# Install Docker and set up the agent environment
+- name: Update apt cache
+  apt:
+    update_cache: yes
+  become: yes
+
+- name: Install Docker
+  apt:
+    name: docker.io
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Enable and start Docker service
+  service:
+    name: docker
+    state: started
+    enabled: yes
+  become: yes
+
+# - name: Pull Docker image
+#   shell: |
+#     "docker pull dengol/tpp-app"
+#   become: yes
+
+- name: Pull Docker image
+  community.docker.docker_image:
+    name: dengol/tpp-app:latest
+    source: pull
+  become: yes
+
+# Run the Docker container
+- name: Run the Docker container
+  community.docker.docker_container:
+    name: tpp-app
+    image: dengol/tpp-app
+    state: started
+    restart_policy: always
+    ports:
+      - "8081:8081"  # Map container's port 8080 to host's port 8080
+  become: yes

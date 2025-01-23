@@ -1,0 +1,57 @@
+# # # ---
+# # # - name: Set DNS name of the Ansible host as a global variable
+# # #   hosts: ec2_jenkins
+# # #   gather_facts: true
+# # #   tasks:
+# # #     - name: Set the public DNS name as a global variable
+# # #       set_fact:
+# # #         ansible_host_dns: "{{ hostvars[inventory_hostname]['network_interfaces'][0]['association']['public_dns_name'] }}"
+
+# # #     - name: Show the DNS name of the host running Ansible
+# # #       debug:
+# # #         msg: "The DNS name (FQDN) of the host running Ansible is: {{ ansible_host_dns }}"
+
+---
+- hosts: ec2_jenkins
+  gather_facts: true
+  tasks:
+    - name: Set Jenkins private IP as a global fact
+      set_fact:
+        jenkins_ip_global: "{{ hostvars[inventory_hostname]['network_interfaces'][0]['association']['public_dns_name'] }}"
+  
+
+    - name: Add Jenkins master to a global host group
+      add_host:
+        name: jenkins_master
+        jenkins_ip_global: "{{ jenkins_ip_global }}"
+  roles:
+    - role: "jenkins"
+
+- hosts: ec2_docker_agent
+  become: yes
+  vars:
+    client_dns: "{{ hostvars[groups['ec2_jenkins'][0]]['jenkins_ip_global'] }}"
+    jenkins_admin_user: "admin"
+    jenkins_admin_password: "admin"
+  tasks:
+    - name: Use Jenkins Master DNS
+      debug:
+        msg: "Jenkins Master is available at: {{ hostvars[inventory_hostname]['network_interfaces'][0]['association']['public_dns_name'] }}"
+  roles:
+    - role: 'docker-agent'
+
+- hosts: ec2_ansible_agent
+  become: yes
+  vars:
+    # client_dns: "52.32.78.197"
+    client_dns: "{{ hostvars[groups['ec2_jenkins'][0]]['jenkins_ip_global'] }}"
+    jenkins_admin_user: "admin"
+    jenkins_admin_password: "admin"
+  vars_files: 
+    - vars/aws_vars.yaml
+  tasks:
+    - name: Use Jenkins Master DNS
+      debug:
+        msg: "Jenkins Master is available at: {{ hostvars[inventory_hostname]['network_interfaces'][0]['association']['public_dns_name'] }}"
+  roles:
+    - role: 'ansible-agent'
