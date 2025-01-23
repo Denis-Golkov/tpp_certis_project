@@ -231,6 +231,7 @@
     name: jenkins-agent
     state: started
     enabled: yes
+  become: yes
 
 - name: Create ansible config directory
   file:
@@ -290,51 +291,7 @@
     owner: 1000
     group: 1000
     
-
-# - name: Copy upgrade playbook
-#   copy:
-#     content: |
-#       ---
-#       - hosts: ec2_tpp_prod
-#         gather_facts: true
-#         tasks:
-#           - name: Setting up Prod servers
-#             debug:
-#               msg: "Prod server setup complete."
-          
-#           - name: Stop existing Docker container
-#             docker_container:
-#               name: "tpp-app"
-#               state: absent
-#             ignore_errors: yes
-
-#           - name: Remove Docker image if exists
-#             docker_image:
-#               name: "dengol/tpp-app"
-#               state: absent
-#               force_absent: true
-#             ignore_errors: yes
-
-#           - name: Pull Docker image
-#             community.docker.docker_image:
-#               name: dengol/tpp-app:latest
-#               source: pull
-#             become: yes
-
-#           - name: Run the Docker container
-#             community.docker.docker_container:
-#               name: tpp-app
-#               image: dengol/tpp-app
-#               state: started
-#               restart_policy: always
-#               ports:
-#                 - "8081:8081"  # Map container's port 8080 to host's port 8080
-#             become: yes
-#     dest: /etc/ansible/upgrade.yaml
-#     mode: '0644'
-#     owner: 1000
-#     group: 1000
-      
+    
 - name: Copy upgrade.yaml to ansible 
   copy:
     src: ./upgrade.yaml  
