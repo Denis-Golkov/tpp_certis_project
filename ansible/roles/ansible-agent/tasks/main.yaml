@@ -7,7 +7,7 @@
   become: yes
 
 # Install Docker and set up the agent environment
-- name: Install Asible
+- name: Install Ansible
   apt:
     name: ansible
     state: present
