@@ -280,7 +280,7 @@
   copy:
     content: |
       [defaults]
-      inventory = /etc/ansible/inventory_aws_ec2.yml
+      inventory = /etc/ansible/inventory_aws_ec2.yaml
       remote_user = ubuntu
       private_key_file = /etc/ansible/INT_AWS_KEY.pem
       host_key_checking = False
