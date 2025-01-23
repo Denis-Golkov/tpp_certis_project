@@ -244,7 +244,7 @@
 
 - name: Copy KEY to Jenkins 
   copy:
-    src: ./INT_AWS_KEY.pem  # Relative path to the file
+    src: path/to/your/key.pem  # Relative path to the file
     dest: /etc/ansible  # Target path on the host
     owner: 1000
     group: 1000
