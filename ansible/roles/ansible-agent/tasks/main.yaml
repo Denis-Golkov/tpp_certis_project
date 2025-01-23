@@ -53,19 +53,23 @@
  
 - name: Run aws configure to set AWS Access Key ID
   shell: aws configure set aws_access_key_id "{{ aws_access_key }}"
+  become_user: ubuntu
     
  
 
 - name: Run aws configure to set AWS Secret Access Key
   shell: aws configure set aws_secret_access_key "{{ aws_secret_key }}"
+  become_user: ubuntu
   
 
 - name: Run aws configure to set AWS region
   shell: aws configure set region "{{ aws_region }}"
+  become_user: ubuntu
   
 
 - name: Run aws configure to set output format
   shell: aws configure set output "{{ aws_output }}"
+  become_user: ubuntu
   
 
 
